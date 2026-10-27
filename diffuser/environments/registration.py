@@ -2,22 +2,6 @@ import gym
 
 ENVIRONMENT_SPECS = (
     {
-        'id': 'HopperFullObs-v2',
-        'entry_point': ('diffuser.environments.hopper:HopperFullObsEnv'),
-    },
-    {
-        'id': 'HalfCheetahFullObs-v2',
-        'entry_point': ('diffuser.environments.half_cheetah:HalfCheetahFullObsEnv'),
-    },
-    {
-        'id': 'Walker2dFullObs-v2',
-        'entry_point': ('diffuser.environments.walker2d:Walker2dFullObsEnv'),
-    },
-    {
-        'id': 'AntFullObs-v2',
-        'entry_point': ('diffuser.environments.ant:AntFullObsEnv'),
-    },
-    {
         'id': 'MobileRobotNav-v0',
         'entry_point': ('diffuser.environments.mobile_robot:MobileRobotEnv'),
     },

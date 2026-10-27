@@ -9,8 +9,8 @@ import diffuser.utils as utils
 #-----------------------------------------------------------------------------#
 
 class Parser(utils.Parser):
-    dataset: str = 'hopper-medium-expert-v2'
-    config: str = 'config.locomotion'
+    dataset: str = 'MobileRobotNav-v0'
+    config: str = 'config.navigation'
 
 args = Parser().parse_args('diffusion')
 
