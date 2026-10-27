@@ -1,0 +1,99 @@
+<mujoco model="mobile_robot_navigation">
+  <compiler angle="radian" coordinate="local"/>
+  <option timestep="0.02" gravity="0 0 -9.81"/>
+
+  <visual>
+    <headlight ambient="0.6 0.6 0.6" diffuse="0.4 0.4 0.4" specular="0.1 0.1 0.1"/>
+    <global offwidth="640" offheight="480"/>
+  </visual>
+
+  <asset>
+    <texture type="2d" name="ground_tex" builtin="checker" rgb1="0.92 0.92 0.94" rgb2="0.82 0.82 0.85" width="400" height="400"/>
+    <material name="ground_mat" texture="ground_tex" texrepeat="6 6" reflectance="0.05"/>
+    <material name="wall_mat" rgba="0.35 0.38 0.45 1" specular="0.2"/>
+    <material name="obstacle_mat" rgba="0.85 0.35 0.25 1" specular="0.3"/>
+    <material name="chassis_mat" rgba="0.18 0.52 0.85 1" specular="0.5"/>
+    <material name="top_deck_mat" rgba="0.15 0.20 0.26 1" specular="0.3"/>
+    <material name="wheel_mat" rgba="0.12 0.12 0.14 1" specular="0.1"/>
+    <material name="nose_mat" rgba="0.95 0.75 0.1 1" specular="0.5"/>
+  </asset>
+
+  <worldbody>
+    <light pos="0 0 7" dir="0 0 -1" castshadow="false"/>
+    <light pos="3 3 5" dir="-0.5 -0.5 -1" castshadow="false"/>
+
+    <!-- Cameras -->
+    <camera name="topdown" pos="0 0 9.5" euler="0 0 0"/>
+    <camera name="overview" pos="0 -6.5 6.0" euler="0.8 0 0"/>
+
+    <!-- Arena Floor with High Grip Friction -->
+    <geom name="floor" type="plane" size="4.0 4.0 0.1" material="ground_mat" friction="2.0 0.05 0.001"/>
+
+    <!-- Perimeter Boundary Walls (8m x 8m enclosed arena) -->
+    <geom name="wall_north" type="box" size="4.1 0.1 0.25" pos="0 4.0 0.25" material="wall_mat"/>
+    <geom name="wall_south" type="box" size="4.1 0.1 0.25" pos="0 -4.0 0.25" material="wall_mat"/>
+    <geom name="wall_east"  type="box" size="0.1 4.1 0.25" pos="4.0 0 0.25" material="wall_mat"/>
+    <geom name="wall_west"  type="box" size="0.1 4.1 0.25" pos="-4.0 0 0.25" material="wall_mat"/>
+
+    <!-- Cylindrical Obstacles as Mocap Bodies (for per-episode randomization) -->
+    <body name="obs_1" mocap="true" pos=" 1.6  1.6 0.3">
+      <geom name="obs_geom_1" type="cylinder" size="0.5 0.3" material="obstacle_mat"/>
+    </body>
+    <body name="obs_2" mocap="true" pos="-1.6  1.6 0.3">
+      <geom name="obs_geom_2" type="cylinder" size="0.5 0.3" material="obstacle_mat"/>
+    </body>
+    <body name="obs_3" mocap="true" pos=" 1.6 -1.6 0.3">
+      <geom name="obs_geom_3" type="cylinder" size="0.5 0.3" material="obstacle_mat"/>
+    </body>
+    <body name="obs_4" mocap="true" pos="-1.6 -1.6 0.3">
+      <geom name="obs_geom_4" type="cylinder" size="0.5 0.3" material="obstacle_mat"/>
+    </body>
+
+    <!-- Target Position Marker (mocap visual body) -->
+    <body name="target" mocap="true" pos="2.5 2.5 0.05">
+      <geom name="target_sphere" type="sphere" size="0.22" rgba="0.1 0.85 0.3 0.7" contype="0" conaffinity="0"/>
+    </body>
+
+    <!-- 4-Wheel Differential Drive Robot with Square Chassis -->
+    <body name="robot" pos="0 0 0.075">
+      <camera name="robot_cam" pos="-0.5 0 0.35" euler="0.6 0 1.5708"/>
+      <!-- Planar chassis translation and yaw rotation -->
+      <joint name="root_x" type="slide" axis="1 0 0" damping="0.5"/>
+      <joint name="root_y" type="slide" axis="0 1 0" damping="0.5"/>
+      <joint name="root_yaw" type="hinge" axis="0 0 1" damping="0.5"/>
+
+      <!-- Square Chassis Body (0.40m x 0.40m x 0.08m) -->
+      <geom name="chassis" type="box" size="0.20 0.20 0.04" pos="0 0 0.02" material="chassis_mat" mass="3.6"/>
+      <!-- Top Deck / Instrument Bay -->
+      <geom name="top_deck" type="box" size="0.13 0.13 0.025" pos="-0.02 0 0.075" material="top_deck_mat" mass="0.5"/>
+      <!-- Heading Indicator (Nose) -->
+      <geom name="nose" type="box" size="0.06 0.04 0.015" pos="0.16 0 0.065" material="nose_mat" mass="0.1"/>
+      <!-- Lidar Sensor Puck -->
+      <geom name="lidar_puck" type="cylinder" size="0.035 0.02" pos="0 0 0.11" rgba="0.1 0.1 0.1 1" mass="0.2"/>
+
+      <!-- Front-Left Wheel -->
+      <body name="wheel_fl" pos="0.13 0.22 0">
+        <joint name="joint_wheel_fl" type="hinge" axis="0 1 0" damping="0.04"/>
+        <geom name="geom_wheel_fl" type="cylinder" size="0.075 0.025" euler="1.5708 0 0" material="wheel_mat" mass="0.35" friction="2.5 0.05 0.001"/>
+      </body>
+
+      <!-- Rear-Left Wheel -->
+      <body name="wheel_rl" pos="-0.13 0.22 0">
+        <joint name="joint_wheel_rl" type="hinge" axis="0 1 0" damping="0.04"/>
+        <geom name="geom_wheel_rl" type="cylinder" size="0.075 0.025" euler="1.5708 0 0" material="wheel_mat" mass="0.35" friction="2.5 0.05 0.001"/>
+      </body>
+
+      <!-- Front-Right Wheel -->
+      <body name="wheel_fr" pos="0.13 -0.22 0">
+        <joint name="joint_wheel_fr" type="hinge" axis="0 1 0" damping="0.04"/>
+        <geom name="geom_wheel_fr" type="cylinder" size="0.075 0.025" euler="1.5708 0 0" material="wheel_mat" mass="0.35" friction="2.5 0.05 0.001"/>
+      </body>
+
+      <!-- Rear-Right Wheel -->
+      <body name="wheel_rr" pos="-0.13 -0.22 0">
+        <joint name="joint_wheel_rr" type="hinge" axis="0 1 0" damping="0.04"/>
+        <geom name="geom_wheel_rr" type="cylinder" size="0.075 0.025" euler="1.5708 0 0" material="wheel_mat" mass="0.35" friction="2.5 0.05 0.001"/>
+      </body>
+    </body>
+  </worldbody>
+</mujoco>
