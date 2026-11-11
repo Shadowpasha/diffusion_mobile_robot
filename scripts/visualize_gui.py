@@ -83,9 +83,9 @@ def draw_visual_overlays(
     theta = float(env.data.qpos[2])
 
     # 1. Visualize 2D LiDAR beams
-    if show_lidar and len(obs) >= 27:
+    if show_lidar and len(obs) >= 11 + env.n_lidar_beams:
         p_origin = np.array([x, y, 0.20], dtype=np.float64)
-        ranges = obs[11:27]
+        ranges = obs[11:11 + env.n_lidar_beams]
         for i in range(len(ranges)):
             ang = theta + env._lidar_angles[i]
             d = float(ranges[i])
@@ -128,19 +128,21 @@ def draw_visual_overlays(
 class DiffusionPolicy:
     """
     Receding-horizon navigation policy using trained Diffuser model.
-    Conditions on current observation and replans every `plan_stride` steps.
-    Supports test-time analytical cost guidance and reachable endpoint tying.
+    Conditions on current observation (t=0) and fixed goal position (t=H-1),
+    generating waypoints/actions and replanning every `plan_stride` steps.
     """
     def __init__(
         self,
-        logdir='logs/MobileRobotNav-v0/diffusion/navigation_H32_T20',
+        logdir='logs/MobileRobotNav-v0/diffusion/navigation_H128_T50',
         epoch='latest',
-        plan_stride=8,
-        guided=True,
-        guide_scale=0.08,
+        plan_stride=6,
+        guided=False,
+        guide_scale=0.05,
         n_guide_steps=2,
         tie_endpoint=True,
-        subgoal_reach=1.6,
+        control_mode='actions',
+        waypoint_lookahead=0.45,
+        n_candidates=4,
         device=None,
     ):
         self.plan_stride = plan_stride
@@ -148,12 +150,16 @@ class DiffusionPolicy:
         self.guide_scale = guide_scale
         self.n_guide_steps = n_guide_steps
         self.tie_endpoint = tie_endpoint
-        self.subgoal_reach = subgoal_reach
+        self.control_mode = control_mode
+        self.waypoint_lookahead = waypoint_lookahead
+        self.n_candidates = 1 if guided else max(1, int(n_candidates))
         self.device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
         self.action_queue = []
         self.current_plan = None
         self.current_goal = None
         self.current_obstacles = None
+        self._plan_step_count = 0
+        self._wp_idx = 1
 
         print(f'[ DiffusionPolicy ] Loading checkpoint from {logdir} (epoch: {epoch}) on {self.device}...')
         model_config = utils.load_config(logdir, 'model_config.pkl')
@@ -198,11 +204,13 @@ class DiffusionPolicy:
                 w_smooth=0.8,
             ).to(self.device)
 
-        print(f'[ DiffusionPolicy ] Ready on {self.device} (Guided: {self.guided}, Tie Endpoint: {self.tie_endpoint}).')
+        print(f'[ DiffusionPolicy ] Ready on {self.device} (Guided: {self.guided}, Tie Endpoint: {self.tie_endpoint}, Mode: {self.control_mode}).')
 
     def reset(self, goal=None, obstacles=None):
         self.action_queue.clear()
         self.current_plan = None
+        self._plan_step_count = 0
+        self._wp_idx = 1
         if goal is not None:
             self.current_goal = np.array(goal, dtype=np.float32)
         if obstacles is not None:
@@ -210,8 +218,70 @@ class DiffusionPolicy:
         if self.guided and self.guide is not None:
             self.guide.set_targets(goal=self.current_goal, obstacles=self.current_obstacles)
 
+    def _score_candidate_plan(self, pts, obs):
+        """Score a candidate (H, 2) path using LiDAR obstacle hits, arena bounds, and smoothness."""
+        x, y = float(obs[0]), float(obs[1])
+        theta = np.arctan2(float(obs[3]), float(obs[2]))
+        lidar = obs[11:]
+        n_beams = len(lidar)
+        angles = theta + np.linspace(0, 2 * np.pi, n_beams, endpoint=False)
+        max_range = max(float(np.max(lidar)), 1.0)
+        valid = lidar < (max_range - 0.15)
+        cost = 0.0
+
+        near_pts = pts[:min(48, len(pts))]
+        if np.any(valid):
+            hits = np.stack([
+                x + lidar[valid] * np.cos(angles[valid]),
+                y + lidar[valid] * np.sin(angles[valid]),
+            ], axis=-1)
+            dists = np.linalg.norm(near_pts[:, None, :] - hits[None, :, :], axis=-1)
+            min_surface_dist = np.min(dists, axis=1)
+            # Robot radius is 0.28m; penalize predicted positions within 0.42m of any LiDAR hit
+            clearance_violation = np.maximum(0.42 - min_surface_dist, 0.0)
+            cost += 120.0 * float(np.sum(clearance_violation ** 2)) + 15.0 * float(np.max(clearance_violation))
+
+        wall_violation = np.maximum(np.abs(near_pts) - 3.55, 0.0)
+        cost += 50.0 * float(np.sum(wall_violation ** 2))
+
+        diffs = np.diff(near_pts, axis=0)
+        cost += 2.0 * float(np.sum(diffs ** 2))
+        return cost
+
+    def _track_waypoints(self, obs):
+        x, y = float(obs[0]), float(obs[1])
+        cos_th, sin_th = float(obs[2]), float(obs[3])
+        theta = np.arctan2(sin_th, cos_th)
+        omega = float(obs[5])
+        dist_goal = float(obs[8])
+        robot_pos = np.array([x, y], dtype=np.float32)
+
+        waypoints = self.current_plan[:, :2]
+        while self._wp_idx < len(waypoints) - 1:
+            if np.linalg.norm(robot_pos - waypoints[self._wp_idx]) < self.waypoint_lookahead:
+                self._wp_idx += 1
+            else:
+                break
+
+        target_pt = waypoints[self._wp_idx]
+        vec = target_pt - robot_pos
+        desired_theta = np.arctan2(vec[1], vec[0])
+        angle_err = np.arctan2(np.sin(desired_theta - theta), np.cos(desired_theta - theta))
+
+        steer_cmd = np.clip(3.2 * angle_err - 0.35 * omega, -1.0, 1.0)
+        speed = 0.95 if dist_goal > 0.8 else max(0.35, dist_goal / 0.8)
+        min_fwd = 0.0 if abs(angle_err) > 1.05 else 0.15
+        forward_cmd = np.clip(np.cos(angle_err) * speed, min_fwd, 1.0)
+        self._plan_step_count += 1
+        return np.array([forward_cmd, steer_cmd], dtype=np.float32)
+
     def act(self, obs, goal=None, obstacles=None):
-        if not self.action_queue:
+        need_replan = (
+            self.current_plan is None
+            or (self.control_mode == 'actions' and not self.action_queue)
+            or (self.control_mode == 'waypoints' and self._plan_step_count >= self.plan_stride)
+        )
+        if need_replan:
             t0 = time.time()
             if goal is not None:
                 self.current_goal = np.array(goal, dtype=np.float32)
@@ -230,29 +300,23 @@ class DiffusionPolicy:
             if self.guided and self.guide is not None:
                 self.guide.set_targets(goal=self.current_goal, obstacles=self.current_obstacles)
 
+            batch_size = self.n_candidates
             normed_obs = self.dataset.normalizer(obs[None, :], 'observations')
-            conditions = {0: torch.tensor(normed_obs, device=self.device, dtype=torch.float32)}
+            obs_cond = torch.tensor(normed_obs, device=self.device, dtype=torch.float32).repeat(batch_size, 1)
+            conditions = {0: obs_cond}
 
-            # Endpoint tying: tie t=H-1 to final goal if close, or reachable subgoal lookahead
+            # Endpoint tying: pin terminal (x, y) directly to the goal position
             if self.tie_endpoint and self.current_goal is not None:
-                x, y = float(obs[0]), float(obs[1])
-                curr_pos = np.array([x, y], dtype=np.float32)
-                dist_goal = float(np.linalg.norm(self.current_goal - curr_pos))
-                if dist_goal <= self.subgoal_reach:
-                    target_pos = self.current_goal.copy()
-                else:
-                    dir_vec = (self.current_goal - curr_pos) / (dist_goal + 1e-6)
-                    target_pos = curr_pos + self.subgoal_reach * dir_vec
+                obs_norm = self.dataset.normalizer.normalizers['observations']
+                mins_xy = obs_norm.mins[:2]
+                maxs_xy = obs_norm.maxs[:2]
+                normed_goal_xy = 2.0 * (self.current_goal[:2] - mins_xy) / (maxs_xy - mins_xy) - 1.0
+                goal_cond = torch.tensor(
+                    normed_goal_xy[None, :], device=self.device, dtype=torch.float32
+                ).repeat(batch_size, 1)
+                conditions[self.diffusion.horizon - 1] = goal_cond
 
-                target_obs = obs.copy()
-                target_obs[0] = target_pos[0]
-                target_obs[1] = target_pos[1]
-                normed_target = self.dataset.normalizer(target_obs[None, :], 'observations')
-                conditions[self.diffusion.horizon - 1] = torch.tensor(
-                    normed_target, device=self.device, dtype=torch.float32
-                )
-
-            shape = (1, self.diffusion.horizon, self.diffusion.transition_dim)
+            shape = (batch_size, self.diffusion.horizon, self.diffusion.transition_dim)
             if self.guided and self.guide is not None:
                 samples = self.diffusion.p_sample_loop(
                     shape,
@@ -266,19 +330,35 @@ class DiffusionPolicy:
                 )
             else:
                 with torch.no_grad():
-                    samples = self.diffusion(conditions)
+                    samples = self.diffusion(conditions, verbose=False)
 
             trajectories = utils.to_np(samples.trajectories)
-            normed_acts = trajectories[0, :, :self.dataset.action_dim]
+            best_idx = 0
+            if batch_size > 1:
+                best_cost = float('inf')
+                for k in range(batch_size):
+                    cand_obs = self.dataset.normalizer.unnormalize(
+                        trajectories[k, :, self.dataset.action_dim:], 'observations'
+                    )
+                    cand_cost = self._score_candidate_plan(cand_obs[:, :2], obs)
+                    if cand_cost < best_cost:
+                        best_cost = cand_cost
+                        best_idx = k
+
+            normed_acts = trajectories[best_idx, :, :self.dataset.action_dim]
             acts = self.dataset.normalizer.unnormalize(normed_acts, 'actions')
-            normed_preds = trajectories[0, :, self.dataset.action_dim:]
+            normed_preds = trajectories[best_idx, :, self.dataset.action_dim:]
             self.current_plan = self.dataset.normalizer.unnormalize(normed_preds, 'observations')
 
             num_to_queue = min(self.plan_stride, len(acts))
             self.action_queue = [acts[i] for i in range(num_to_queue)]
+            self._plan_step_count = 0
+            self._wp_idx = min(3, len(self.current_plan) - 1)
             gen_time = time.time() - t0
-            print(f'  [Replanned {len(acts)} steps in {gen_time:.2f}s] Queued next {num_to_queue} actions | Current goal dist: {obs[8]:.2f}m')
+            print(f'  [Replanned {len(acts)} steps in {gen_time:.2f}s] Mode: {self.control_mode} | Current goal dist: {obs[8]:.2f}m')
 
+        if self.control_mode == 'waypoints':
+            return self._track_waypoints(obs)
         return self.action_queue.pop(0)
 
 
@@ -286,11 +366,13 @@ def run_simulation_test(
     num_episodes=3,
     max_steps=160,
     policy_type='diffusion',
-    plan_stride=8,
-    guided=True,
-    guide_scale=0.08,
+    logdir='logs/MobileRobotNav-v0/diffusion/navigation_H128_T50',
+    plan_stride=6,
+    guided=False,
+    guide_scale=0.05,
     tie_endpoint=True,
-    subgoal_reach=1.6,
+    control_mode='actions',
+    n_candidates=4,
     step_delay=0.02,
     headless=False,
     save_video_path=None,
@@ -300,24 +382,32 @@ def run_simulation_test(
 ):
     print(f'=== Starting MuJoCo Simulation Test ===')
     print(f'Policy: {policy_type.upper()} | Episodes: {num_episodes} | Max steps: {max_steps} | Headless: {headless}')
-    print(f'Guided: {guided} (scale: {guide_scale}) | Tie Endpoint: {tie_endpoint} (reach: {subgoal_reach}m)')
+    print(f'Guided: {guided} (scale: {guide_scale}) | Tie Endpoint: {tie_endpoint} | Control Mode: {control_mode}')
     print(f'Visualizations: LiDAR={show_lidar} | Diffuser Path={show_path}')
-
-    env = MobileRobotEnv(
-        max_episode_steps=max_steps,
-        terminate_on_collision=terminate_on_collision,
-        randomize_obstacles=True,
-    )
 
     if policy_type == 'diffusion':
         policy = DiffusionPolicy(
+            logdir=logdir,
             plan_stride=plan_stride,
             guided=guided,
             guide_scale=guide_scale,
             tie_endpoint=tie_endpoint,
-            subgoal_reach=subgoal_reach,
+            control_mode=control_mode,
+            n_candidates=n_candidates,
+        )
+        n_lidar_beams = max(1, policy.dataset.observation_dim - 11)
+        env = MobileRobotEnv(
+            max_episode_steps=max_steps,
+            terminate_on_collision=terminate_on_collision,
+            n_lidar_beams=n_lidar_beams,
+            randomize_obstacles=True,
         )
     else:
+        env = MobileRobotEnv(
+            max_episode_steps=max_steps,
+            terminate_on_collision=terminate_on_collision,
+            randomize_obstacles=True,
+        )
         policy = NavigationExpertPolicy(env, noise_std=0.05)
 
     recorded_frames = []
@@ -457,30 +547,35 @@ def run_simulation_test(
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='MuJoCo Simulation Testing for Navigation Policy')
     parser.add_argument('--policy', type=str, default='diffusion', choices=['diffusion', 'expert'], help='Policy to evaluate (diffusion or expert)')
+    parser.add_argument('--logdir', type=str, default='logs/MobileRobotNav-v0/diffusion/navigation_H128_T50', help='Trained model log directory')
     parser.add_argument('--episodes', type=int, default=3, help='Number of test episodes')
     parser.add_argument('--max_steps', type=int, default=160, help='Maximum steps per episode')
-    parser.add_argument('--stride', type=int, default=8, help='Replanning stride (number of steps executed per plan generation)')
+    parser.add_argument('--stride', type=int, default=6, help='Replanning stride (number of steps executed per plan generation)')
     parser.add_argument('--delay', type=float, default=0.02, help='Playback delay between simulation steps')
     parser.add_argument('--headless', action='store_true', help='Run headless without launching desktop GUI window')
     parser.add_argument('--save_video', type=str, default='data/diffusion_sim_eval.mp4', help='Path to save MP4 evaluation recording')
     parser.add_argument('--terminate_on_collision', action='store_true', help='Immediately terminate episode on obstacle collision')
     parser.add_argument('--no_lidar', action='store_true', help='Disable LiDAR beam visualization')
     parser.add_argument('--no_path', action='store_true', help='Disable predicted diffuser path visualization')
-    parser.add_argument('--no_guide', action='store_true', help='Disable analytical cost guidance')
-    parser.add_argument('--guide_scale', type=float, default=0.08, help='Scale of analytical cost guidance gradient')
-    parser.add_argument('--no_tie_endpoint', action='store_true', help='Disable tying terminal step to reachable subgoal or goal')
-    parser.add_argument('--subgoal_reach', type=float, default=1.6, help='Maximum lookahead distance for terminal subgoal')
+    parser.add_argument('--guide', action='store_true', help='Enable analytical cost guidance')
+    parser.add_argument('--no_guide', action='store_true', help='Disable analytical cost guidance (default)')
+    parser.add_argument('--guide_scale', type=float, default=0.05, help='Scale of analytical cost guidance gradient')
+    parser.add_argument('--no_tie_endpoint', action='store_true', help='Disable fixing terminal step to goal')
+    parser.add_argument('--control_mode', type=str, default='actions', choices=['actions', 'waypoints'], help='Execute predicted actions directly or follow generated waypoints via PD tracker')
+    parser.add_argument('--n_candidates', type=int, default=4, help='Parallel candidate trajectories scored by LiDAR clearance per replan (unguided)')
 
     args = parser.parse_args()
     run_simulation_test(
         num_episodes=args.episodes,
         max_steps=args.max_steps,
         policy_type=args.policy,
+        logdir=args.logdir,
         plan_stride=args.stride,
-        guided=not args.no_guide,
+        guided=args.guide and not args.no_guide,
         guide_scale=args.guide_scale,
         tie_endpoint=not args.no_tie_endpoint,
-        subgoal_reach=args.subgoal_reach,
+        control_mode=args.control_mode,
+        n_candidates=args.n_candidates,
         step_delay=args.delay,
         headless=args.headless,
         save_video_path=args.save_video,

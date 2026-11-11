@@ -53,6 +53,7 @@ model_config = utils.Config(
     horizon=args.horizon,
     transition_dim=observation_dim + action_dim,
     cond_dim=observation_dim,
+    dim=getattr(args, 'dim', 32),
     dim_mults=args.dim_mults,
     attention=args.attention,
     device=args.device,

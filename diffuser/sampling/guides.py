@@ -88,9 +88,9 @@ class AnalyticalNavigationGuide(nn.Module):
         # 3. Wall repulsion
         loss_wall = torch.sum(torch.relu(torch.abs(pos) - (self.arena_limit - 0.35)) ** 2, dim=[1, 2])
 
-        # 4. Smoothness penalty
+        # 4. Smoothness penalty (horizon-invariant scaling)
         diffs = pos[:, 1:] - pos[:, :-1]
-        loss_smooth = torch.sum(diffs ** 2, dim=[1, 2])
+        loss_smooth = torch.mean(diffs ** 2, dim=[1, 2]) * 32.0
 
         total = - (self.w_goal * loss_goal + self.w_obs * loss_obs + self.w_wall * loss_wall + self.w_smooth * loss_smooth)
         return total

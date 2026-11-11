@@ -108,7 +108,8 @@ class GaussianDiffusion(nn.Module):
         ## set loss coefficients for dimensions of observation
         if weights_dict is None: weights_dict = {}
         for ind, w in weights_dict.items():
-            dim_weights[self.action_dim + ind] *= w
+            if self.action_dim + ind < self.transition_dim:
+                dim_weights[self.action_dim + ind] *= w
 
         ## decay loss with trajectory timestep: discount**t
         discounts = discount ** torch.arange(self.horizon, dtype=torch.float)

@@ -103,6 +103,40 @@ class GoalDataset(SequenceDataset):
         }
 
 
+class NavigationGoalDataset(SequenceDataset):
+    '''
+        Goal-conditioned navigation dataset that pads episode tails by holding
+        at the terminal goal state (instead of zeros) and conditions on the
+        full start observation and the terminal (x, y) goal position.
+    '''
+
+    def normalize(self, keys=['observations', 'actions']):
+        obs_norm = self.normalizer.normalizers['observations']
+        for i, length in enumerate(self.path_lengths):
+            if length < self.max_path_length:
+                hold_obs = self.fields['observations'][i, length - 1].copy()
+                hold_obs[4] = np.clip(0.0, obs_norm.mins[4], obs_norm.maxs[4])
+                hold_obs[5] = np.clip(0.0, obs_norm.mins[5], obs_norm.maxs[5])
+                self.fields['observations'][i, length:] = hold_obs
+                self.fields['actions'][i, length:] = 0.0
+        super().normalize(keys=keys)
+
+    def make_indices(self, path_lengths, horizon):
+        indices = []
+        for i, path_length in enumerate(path_lengths):
+            max_start = min(max(1, path_length - 4), self.max_path_length - horizon + 1)
+            for start in range(max_start):
+                end = start + horizon
+                indices.append((i, start, end))
+        return np.array(indices)
+
+    def get_conditions(self, observations):
+        return {
+            0: observations[0],
+            self.horizon - 1: observations[-1, :2],
+        }
+
+
 class ValueDataset(SequenceDataset):
     '''
         adds a value field to the datapoints for training the value function

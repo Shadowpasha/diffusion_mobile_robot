@@ -59,7 +59,7 @@ def sync_log(log_path, tb_logdir, follow=True):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--log', type=str, required=True, help='Path to task.log')
-    parser.add_argument('--tb_dir', type=str, default='logs/MobileRobotNav-v0/diffusion/navigation_H32_T20/tb', help='Tensorboard log dir')
+    parser.add_argument('--tb_dir', type=str, default='logs/MobileRobotNav-v0/diffusion/navigation_H128_T50/tb', help='Tensorboard log dir')
     parser.add_argument('--no_follow', action='store_true', help='Do not follow live updates')
     args = parser.parse_args()
 

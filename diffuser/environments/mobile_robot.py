@@ -22,8 +22,8 @@ class MobileRobotEnv(gym.Env):
         goal_threshold=0.45,
         dataset_path=None,
         terminate_on_collision=True,
-        n_lidar_beams=16,
-        lidar_max_range=5.0,
+        n_lidar_beams=48,
+        lidar_max_range=6.0,
         randomize_obstacles=True,
     ):
         super().__init__()
@@ -92,7 +92,7 @@ class MobileRobotEnv(gym.Env):
             low=-1.0, high=1.0, shape=(2,), dtype=np.float32
         )
 
-        # Observation (27 dims with 16 LiDAR beams):
+        # Observation (11 + n_lidar_beams dims, 59 dims with 48 LiDAR beams):
         # 0, 1: x, y (robot global position)
         # 2, 3: cos(theta), sin(theta) (robot heading)
         # 4: v_forward (forward linear velocity)
@@ -102,7 +102,7 @@ class MobileRobotEnv(gym.Env):
         # 8: goal_dist (Euclidean distance to goal, meters)
         # 9: goal_cos (cosine of relative angle to goal)
         # 10: goal_sin (sine of relative angle to goal)
-        # 11..26: 16 LiDAR range beams (meters)
+        # 11..10+n_lidar_beams: n_lidar_beams LiDAR range beams (meters)
         self.obs_dim = 11 + self.n_lidar_beams
         self.observation_space = spaces.Box(
             low=-np.inf, high=np.inf, shape=(self.obs_dim,), dtype=np.float32
